@@ -1,5 +1,7 @@
 # Driftwind
 
+**Play it in your browser: https://greentheo.github.io/driftwind/**
+
 A relaxing physics toss game (working title). Launch a spinning cylinder over
 procedurally generated terrain and land it on the target pad — like washers,
 but the air is alive: gusting winds curl around the hills and interact with
