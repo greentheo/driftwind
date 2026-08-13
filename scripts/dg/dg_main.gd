@@ -12,6 +12,9 @@ enum State { AIMING, FLYING, SETTLED, HOLED }
 const HORIZON := 330.0
 const YSCALE := 0.55
 const ZSCALE := 0.9
+## View yaw: 0 would be a pure side view, 90 a straight behind-the-thrower
+## view. ~40 degrees splits the difference so the hole runs diagonally away.
+const VIEW_YAW := 0.7        # radians (~40 deg)
 
 const SKY := Color(0.70, 0.80, 0.86)
 const ROUGH := Color(0.45, 0.58, 0.37)
@@ -42,8 +45,14 @@ var prev_lie := Vector2.ZERO
 var heading := 0.0
 var loft := 14.0
 var power := 700.0
-var spin := 0.6
+var spin_strength := 0.6     # 0.2 .. 1.0, set with A/D
+var forehand := false        # F toggles; sets the spin direction
+var tilt_deg := 0.0          # -35 .. 35, set with Q/E (hyzer / anhyzer)
 var t := 0.0
+
+var _cy := cos(VIEW_YAW)
+var _sy := sin(VIEW_YAW)
+var _roll := 0.0             # visual spin angle for the disc spokes
 
 var camera: Camera2D
 var _trail: Array[Vector3] = []
@@ -58,8 +67,14 @@ var _message_label: Label
 var _wind_arrow: Node2D
 
 
+func _spin_signed() -> float:
+	return spin_strength * (1.0 if forehand else -1.0)
+
+
 func _ready() -> void:
-	RenderingServer.set_default_clear_color(SKY)
+	# With the rotated 3/4 view the ground plane fills the frame, so the
+	# clear color is grass, not sky.
+	RenderingServer.set_default_clear_color(ROUGH.darkened(0.06))
 	camera = Camera2D.new()
 	camera.position_smoothing_enabled = true
 	camera.position_smoothing_speed = 4.0
@@ -82,12 +97,15 @@ func _start_hole() -> void:
 	heading = _angle_to_basket()
 	loft = 14.0
 	power = 700.0
-	spin = 0.6
+	spin_strength = 0.6
+	tilt_deg = 0.0
 	disc.active = false
 	disc.pos = _lie_pos3()
 	_trail.clear()
 	_hit_trees.clear()
 	_make_streaks()
+	camera.position = _project(_lie_pos3())
+	camera.reset_smoothing()
 	_set_message("Hole %d — par %d, %d m. Space to throw." % [
 			hole, course.par, _dist_m(lie, course.basket)])
 
@@ -121,6 +139,11 @@ func _process(delta: float) -> void:
 				hole += 1
 				_start_hole()
 
+	# Visual spin: the spokes rotate at a rate and direction matching the
+	# disc's actual (or configured) spin.
+	var s := disc.spin if state == State.FLYING else _spin_signed()
+	_roll += s * 9.0 * delta
+
 	_advect_streaks(delta)
 	_update_camera()
 	_update_hud()
@@ -141,17 +164,28 @@ func _handle_aiming(delta: float) -> void:
 	if Input.is_key_pressed(KEY_S):
 		power = clampf(power - POWER_RATE * delta, 300.0, 950.0)
 	if Input.is_key_pressed(KEY_A):
-		spin = clampf(spin - SPIN_RATE * delta, -1.0, 1.0)
+		spin_strength = clampf(spin_strength - SPIN_RATE * delta, 0.2, 1.0)
 	if Input.is_key_pressed(KEY_D):
-		spin = clampf(spin + SPIN_RATE * delta, -1.0, 1.0)
+		spin_strength = clampf(spin_strength + SPIN_RATE * delta, 0.2, 1.0)
+	if Input.is_key_pressed(KEY_Q):
+		tilt_deg = clampf(tilt_deg - 40.0 * delta, -35.0, 35.0)
+	if Input.is_key_pressed(KEY_E):
+		tilt_deg = clampf(tilt_deg + 40.0 * delta, -35.0, 35.0)
+	if Input.is_key_pressed(KEY_F) and not _f_held:
+		forehand = not forehand
+	_f_held = Input.is_key_pressed(KEY_F)
 	if Input.is_action_just_pressed("ui_accept"):
 		_throw()
+
+
+var _f_held := false
 
 
 func _throw() -> void:
 	stroke += 1
 	prev_lie = lie
-	disc.launch(_lie_pos3(), heading, loft, power, spin)
+	disc.launch(_lie_pos3(), heading, loft, power, _spin_signed(),
+			deg_to_rad(tilt_deg))
 	_trail.clear()
 	_hit_trees.clear()
 	state = State.FLYING
@@ -284,15 +318,21 @@ func _update_camera() -> void:
 		focus = _ground_pt(b.x, b.y)
 	else:
 		focus = _project(disc.pos if state != State.AIMING else _lie_pos3())
-	var half := 620.0
-	camera.position = Vector2(
-			clampf(focus.x, half, maxf(course.length + 200.0 - half, half)), 360.0)
+	camera.position = focus
 
 
 # ---------- projection & drawing ----------
 
+## Rotate the world by VIEW_YAW, then squash depth and lift by altitude.
 func _project(wp: Vector3) -> Vector2:
-	return Vector2(wp.x, HORIZON + wp.y * YSCALE - wp.z * ZSCALE)
+	var u := wp.x * _cy + wp.y * _sy
+	var v := -wp.x * _sy + wp.y * _cy
+	return Vector2(u, HORIZON + v * YSCALE - wp.z * ZSCALE)
+
+
+## Painter-sort depth: larger = closer to the viewer.
+func _depth(x: float, y: float) -> float:
+	return -x * _sy + y * _cy
 
 
 func _ground_pt(x: float, y: float) -> Vector2:
@@ -301,12 +341,13 @@ func _ground_pt(x: float, y: float) -> Vector2:
 
 func _draw() -> void:
 	_draw_ground()
-	# Painter-sort everything with a vertical footprint by world y.
+	# Painter-sort everything with a vertical footprint by view depth.
 	var items: Array = []
 	for i in course.trees.size():
-		items.append({"y": (course.trees[i]["pos"] as Vector2).y, "kind": "tree", "i": i})
-	items.append({"y": course.basket.y, "kind": "basket", "i": 0})
-	items.append({"y": disc.pos.y, "kind": "disc", "i": 0})
+		var tp: Vector2 = course.trees[i]["pos"]
+		items.append({"y": _depth(tp.x, tp.y), "kind": "tree", "i": i})
+	items.append({"y": _depth(course.basket.x, course.basket.y), "kind": "basket", "i": 0})
+	items.append({"y": _depth(disc.pos.x, disc.pos.y), "kind": "disc", "i": 0})
 	items.sort_custom(func(a, b): return a["y"] < b["y"])
 	_draw_trail()
 	for it in items:
@@ -323,10 +364,6 @@ func _draw() -> void:
 
 
 func _draw_ground() -> void:
-	# Distant treeline, then the playfield band.
-	draw_rect(Rect2(-300, HORIZON - 330, course.length + 700, 60), TREELINE)
-	draw_rect(Rect2(-300, HORIZON - 270, course.length + 700, 640), ROUGH)
-
 	# Fairway ribbon along the centerline.
 	var top := PackedVector2Array()
 	var bottom := PackedVector2Array()
@@ -353,9 +390,12 @@ func _draw_ground() -> void:
 		draw_colored_polygon(pts, WATER_COL)
 		draw_polyline(pts, WATER_COL.lightened(0.25), 2.0, true)
 
-	# Tee pad.
-	var tp := _ground_pt(course.tee.x, course.tee.y)
-	draw_rect(Rect2(tp.x - 22, tp.y - 12, 44, 24), Color(0.62, 0.60, 0.55))
+	# Tee pad: a world-space quad so it follows the view rotation.
+	var tee := course.tee
+	draw_colored_polygon(PackedVector2Array([
+		_ground_pt(tee.x - 24, tee.y - 14), _ground_pt(tee.x + 24, tee.y - 14),
+		_ground_pt(tee.x + 24, tee.y + 14), _ground_pt(tee.x - 24, tee.y + 14),
+	]), Color(0.62, 0.60, 0.55))
 
 
 func _draw_tree(tr: Dictionary) -> void:
@@ -412,9 +452,16 @@ func _draw_disc() -> void:
 	draw_circle(Vector2.ZERO, srad, Color(0, 0, 0, 0.22))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	var sp := _project(disc.pos)
-	draw_set_transform(sp, 0.0, Vector2(1.0, 0.55))
+	# The ellipse leans with the disc's bank (tilt) so hyzer/anhyzer reads.
+	var lean := (disc.tilt if state == State.FLYING else deg_to_rad(tilt_deg)) * 0.6
+	draw_set_transform(sp, lean, Vector2(1.0, 0.55))
 	draw_circle(Vector2.ZERO, 10.0, DISC_COL)
 	draw_arc(Vector2.ZERO, 9.0, 0.0, TAU, 24, DISC_COL.darkened(0.35), 2.0, true)
+	# Spokes rotating with the actual spin: direction and rate are visible.
+	for k in 3:
+		var a := _roll + k * TAU / 3.0
+		draw_line(Vector2.ZERO, Vector2.from_angle(a) * 8.0,
+				DISC_COL.darkened(0.45), 1.8, true)
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
@@ -428,19 +475,28 @@ func _draw_trail() -> void:
 
 
 func _draw_aim_guide() -> void:
-	# Wind-free preview including the S-curve, so players learn their disc.
+	# Wind-free preview including spin curve and tilt, so players learn
+	# their disc. Each arc dot casts a shadow dot on the ground (reads the
+	# left/right line) with connector ticks (reads the height).
 	var probe := DGDisc.new()
-	probe.launch(_lie_pos3(), heading, loft, power, spin)
+	probe.launch(_lie_pos3(), heading, loft, power, _spin_signed(),
+			deg_to_rad(tilt_deg))
 	var pts: Array[Vector3] = []
-	for i in 26:
+	for i in 30:
 		for k in 3:
 			probe.step(1.0 / 60.0, Vector2.ZERO)
 		pts.append(probe.pos)
 		if probe.pos.z <= course.elevation(probe.pos.x):
 			break
 	for i in pts.size():
-		var a := 0.55 * (1.0 - i / float(pts.size() + 2))
-		draw_circle(_project(pts[i]), 3.0, Color(0.08, 0.10, 0.13, a))
+		var fade := 1.0 - i / float(pts.size() + 2)
+		var wp := pts[i]
+		var arc_pt := _project(wp)
+		var ground := _ground_pt(wp.x, wp.y)
+		draw_circle(ground, 2.4, Color(0.05, 0.08, 0.05, 0.45 * fade))
+		if i % 3 == 1:
+			draw_line(ground, arc_pt, Color(0.08, 0.10, 0.13, 0.18 * fade), 1.0, true)
+		draw_circle(arc_pt, 3.2, Color(0.08, 0.10, 0.13, 0.6 * fade))
 
 
 func _make_streaks() -> void:
@@ -482,15 +538,15 @@ func _build_hud() -> void:
 	add_child(hud)
 	_info_label = _make_label(hud, Vector2(16, 12))
 	_wind_label = _make_label(hud, Vector2(560, 12))
-	_throw_label = _make_label(hud, Vector2(16, 690 - 26))
+	_throw_label = _make_label(hud, Vector2(16, 638))
 	_message_label = _make_label(hud, Vector2(340, 64))
 	_message_label.custom_minimum_size = Vector2(600, 0)
 	_message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_message_label.add_theme_font_size_override("font_size", 24)
-	var help := _make_label(hud, Vector2(16, 690))
-	help.text = "arrows: aim + loft   W/S: power   A/D: spin   space: throw   hold Tab: view basket"
+	var help := _make_label(hud, Vector2(16, 668))
+	help.text = "LEFT/RIGHT aim    UP/DOWN loft    W/S power    A/D spin strength\nQ/E disc tilt (hyzer/anhyzer)    F forehand-backhand    SPACE throw    hold TAB view basket"
 	help.add_theme_font_size_override("font_size", 13)
-	help.modulate = Color(1, 1, 1, 0.8)
+	help.modulate = Color(1, 1, 1, 0.85)
 	_wind_arrow = Node2D.new()
 	_wind_arrow.position = Vector2(540, 22)
 	_wind_arrow.draw.connect(_draw_wind_arrow)
@@ -525,13 +581,14 @@ func _update_hud() -> void:
 			hole, course.par, stroke, vs]
 	var wv := wind.at(disc.pos if state == State.FLYING else _lie_pos3(), t)
 	_wind_label.text = "      wind %d (%s)" % [int(wv.length()), wind.description()]
-	var spin_desc := "flat"
-	if spin > 0.05:
-		spin_desc = "CW %.1f" % spin
-	elif spin < -0.05:
-		spin_desc = "CCW %.1f" % absf(spin)
-	_throw_label.text = "loft %.0f°   power %.0f   spin %s   |   %d m to basket" % [
-			loft, power, spin_desc, _dist_m(
+	var style := "forehand" if forehand else "backhand"
+	var tilt_desc := "flat"
+	if tilt_deg > 2.0:
+		tilt_desc = "tilt R %.0f" % tilt_deg
+	elif tilt_deg < -2.0:
+		tilt_desc = "tilt L %.0f" % absf(tilt_deg)
+	_throw_label.text = "%s   loft %.0f   power %.0f   spin %.1f   %s   |   %d m to basket" % [
+			style, loft, power, spin_strength, tilt_desc, _dist_m(
 			Vector2(disc.pos.x, disc.pos.y) if state != State.AIMING else lie,
 			course.basket)]
 	_wind_arrow.queue_redraw()

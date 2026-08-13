@@ -28,17 +28,20 @@ const SPIN_DECAY := 0.10
 var pos := Vector3.ZERO
 var vel := Vector3.ZERO
 var spin := 0.0            # -1..1, + = clockwise seen from above
+var tilt := 0.0            # radians of bank (hyzer/anhyzer); + pours lift
+                           # toward the flight path's left-perpendicular
 var active := false
 var grounded := false
 
 
 func launch(from: Vector3, heading_rad: float, loft_deg: float,
-		power: float, spin_amt: float) -> void:
+		power: float, spin_amt: float, tilt_rad: float = 0.0) -> void:
 	pos = from
 	var loft := deg_to_rad(loft_deg)
 	var h := cos(loft) * power
 	vel = Vector3(cos(heading_rad) * h, sin(heading_rad) * h, sin(loft) * power)
 	spin = spin_amt
+	tilt = tilt_rad
 	active = true
 	grounded = false
 
@@ -50,13 +53,21 @@ func step(delta: float, wind: Vector2) -> void:
 	var a := Vector3(0.0, 0.0, -G)
 	a += -KD * speed * vr
 	if not grounded:
-		a.z += minf(KL * h2, LIFT_CAP * G)
+		var lift := minf(KL * h2, LIFT_CAP * G)
 		var h := Vector2(vr.x, vr.y)
 		if h.length_squared() > 100.0:
 			var perp := Vector2(-h.y, h.x).normalized()
+			# A banked disc pours part of its lift sideways: tilt WITH the
+			# spin's curve gives one big sweeping arc, tilt AGAINST it makes
+			# the flight fight itself into complex S-shapes.
+			a.z += lift * cos(tilt)
+			a.x += perp.x * lift * sin(tilt)
+			a.y += perp.y * lift * sin(tilt)
 			var lat := spin * (KT * h2 - KF)
 			a.x += perp.x * lat
 			a.y += perp.y * lat
+		else:
+			a.z += lift
 	vel += a * delta
 	pos += vel * delta
 	spin *= exp(-SPIN_DECAY * delta)
