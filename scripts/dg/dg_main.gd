@@ -201,6 +201,7 @@ func _throw() -> void:
 			deg_to_rad(tilt_deg))
 	_trail.clear()
 	_hit_trees.clear()
+	_chain_rolled = false
 	state = State.FLYING
 	_set_message("")
 
@@ -252,13 +253,44 @@ func _check_trees() -> void:
 				_set_message("Kicked off a branch!")
 
 
+## The basket takes skill: a smaller catch window, and a single probability
+## roll per approach. Chance scales with how centered the hit is and how
+## long the throw was — tap-ins from close drop ~70-95% of the time, bombs
+## from way out mostly rattle the chains and spit out beside the basket.
+const CATCH_RADIUS := 16.0
+
+var _chain_rolled := false
+
+
 func _check_basket() -> void:
+	if _chain_rolled:
+		return
 	var b := course.basket
 	var e := course.elevation(b.x)
 	var d := Vector2(disc.pos.x - b.x, disc.pos.y - b.y).length()
+	if d >= CATCH_RADIUS or disc.pos.z < e + 12.0 or disc.pos.z > e + 50.0:
+		return
+	_chain_rolled = true
 	var hspeed := Vector2(disc.vel.x, disc.vel.y).length()
-	if d < 24.0 and disc.pos.z > e + 14.0 and disc.pos.z < e + 52.0 and hspeed < 720.0:
+	if hspeed > 650.0:
+		disc.vel.x *= 0.35
+		disc.vel.y *= 0.35
+		disc.spin *= 0.4
+		_set_message("Blasted through the chains!")
+		return
+	var centered := 1.0 - d / CATCH_RADIUS
+	var throw_dist := prev_lie.distance_to(b)
+	var range_factor := clampf(1.0 - (throw_dist - 250.0) / 1300.0, 0.30, 1.0)
+	var p_catch := clampf((0.55 + 0.40 * centered) * range_factor, 0.10, 0.95)
+	if _rng.randf() < p_catch:
 		_holed()
+	else:
+		# Chain spit-out: the disc dies on the chains and drops beside.
+		var hn := Vector2(disc.vel.x, disc.vel.y).normalized()
+		disc.vel = Vector3(-hn.x * _rng.randf_range(30.0, 70.0),
+				-hn.y * _rng.randf_range(30.0, 70.0), 20.0)
+		disc.spin *= 0.3
+		_set_message("Spit out!")
 
 
 func _check_ground(delta: float) -> void:
@@ -302,8 +334,8 @@ func _settle() -> void:
 		state = State.SETTLED
 		_advance_at = t + 2.0
 		_set_message("Out of bounds! Penalty stroke — rethrow from your last lie.")
-	elif p.distance_to(course.basket) < 18.0:
-		_holed()
+	elif p.distance_to(course.basket) < 12.0:
+		_holed()  # came to rest against the basket: drop-in
 	else:
 		lie = p
 		state = State.SETTLED
@@ -526,8 +558,10 @@ func _draw_aim_guide() -> void:
 	var probe := DGDisc.new()
 	probe.launch(_lie_pos3(), heading, loft, power, _spin_signed(),
 			deg_to_rad(tilt_deg))
+	# Deliberately shows only the early flight — where the disc actually
+	# ends up is the player's read, not the UI's.
 	var pts: Array[Vector3] = []
-	for i in 30:
+	for i in 21:
 		for k in 3:
 			probe.step(1.0 / 60.0, Vector2.ZERO)
 		pts.append(probe.pos)
@@ -547,7 +581,7 @@ func _draw_aim_guide() -> void:
 
 func _make_streaks() -> void:
 	_streaks.clear()
-	for i in 30:
+	for i in 34:
 		_streaks.append(Vector3(
 				_rng.randf_range(0.0, course.length),
 				_rng.randf_range(-320.0, 320.0), _rng.randf_range(40.0, 110.0)))
@@ -565,16 +599,17 @@ func _advect_streaks(delta: float) -> void:
 
 
 func _draw_streaks() -> void:
+	var vs := _vis_scale()
 	for s in _streaks:
 		var w := wind.at(s, t)
 		var mag := w.length()
 		if mag < 1.0:
 			continue
 		var p := _project(s)
-		var tail := _project(Vector3(s.x - w.x * 0.25, s.y - w.y * 0.25, s.z))
-		var alpha := clampf(0.15 + mag / 150.0, 0.18, 0.6)
-		draw_line(p, tail, Color(0.16, 0.26, 0.38, alpha), 2.0, true)
-		draw_circle(p, 1.8, Color(0.16, 0.26, 0.38, alpha))
+		var tail := _project(Vector3(s.x - w.x * 0.30, s.y - w.y * 0.30, s.z))
+		var alpha := clampf(0.18 + mag / 130.0, 0.22, 0.7)
+		draw_line(p, tail, Color(0.16, 0.26, 0.38, alpha), 2.5 * vs, true)
+		draw_circle(p, 2.2 * vs, Color(0.16, 0.26, 0.38, alpha))
 
 
 # ---------- HUD ----------

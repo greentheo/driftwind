@@ -24,6 +24,7 @@ const LIFT_CAP := 0.92     # max lift as a fraction of G
 const KT := 0.0006
 const KF := 150.0
 const SPIN_DECAY := 0.10
+const TILT_GAIN := 1.5     # exaggerates hyzer/anhyzer carve (arcade feel)
 
 var pos := Vector3.ZERO
 var vel := Vector3.ZERO
@@ -61,8 +62,8 @@ func step(delta: float, wind: Vector2) -> void:
 			# spin's curve gives one big sweeping arc, tilt AGAINST it makes
 			# the flight fight itself into complex S-shapes.
 			a.z += lift * cos(tilt)
-			a.x += perp.x * lift * sin(tilt)
-			a.y += perp.y * lift * sin(tilt)
+			a.x += perp.x * lift * sin(tilt) * TILT_GAIN
+			a.y += perp.y * lift * sin(tilt) * TILT_GAIN
 			var lat := spin * (KT * h2 - KF)
 			a.x += perp.x * lat
 			a.y += perp.y * lat
