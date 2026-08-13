@@ -55,6 +55,7 @@ var _sy := sin(VIEW_YAW)
 var _roll := 0.0             # visual spin angle for the disc spokes
 var _fit_center := Vector2.ZERO
 var _fit_zoom := 1.0
+var _advance_at := -1.0      # auto-continue time after a shot settles
 
 var camera: Camera2D
 var _trail: Array[Vector3] = []
@@ -110,7 +111,7 @@ func _start_hole() -> void:
 	camera.position = _fit_center
 	camera.zoom = Vector2(_fit_zoom, _fit_zoom)
 	camera.reset_smoothing()
-	_set_message("Hole %d — par %d, %d m. Space to throw." % [
+	_set_message("Hole %d — par %d, %d m." % [
 			hole, course.par, _dist_m(lie, course.basket)])
 
 
@@ -132,14 +133,11 @@ func _process(delta: float) -> void:
 		State.AIMING:
 			_handle_aiming(delta)
 		State.SETTLED:
-			if Input.is_action_just_pressed("ui_accept"):
-				state = State.AIMING
-				heading = _angle_to_basket()
-				disc.pos = _lie_pos3()
-				_trail.clear()
-				_set_message("")
+			# Auto-continue after a short beat; space skips the wait.
+			if Input.is_action_just_pressed("ui_accept") or t >= _advance_at:
+				_next_shot()
 		State.HOLED:
-			if Input.is_action_just_pressed("ui_accept"):
+			if Input.is_action_just_pressed("ui_accept") or t >= _advance_at:
 				hole += 1
 				_start_hole()
 
@@ -183,6 +181,17 @@ func _handle_aiming(delta: float) -> void:
 
 
 var _f_held := false
+
+
+func _next_shot() -> void:
+	state = State.AIMING
+	heading = _angle_to_basket()
+	disc.pos = _lie_pos3()
+	_trail.clear()
+	# Re-frame for the remaining shot: from just behind the new lie to the
+	# basket — the part of the hole already played drops out of view.
+	_compute_hole_framing()
+	_set_message("")
 
 
 func _throw() -> void:
@@ -284,19 +293,22 @@ func _settle() -> void:
 		stroke += 1
 		lie = prev_lie
 		state = State.SETTLED
-		_set_message("Splash! Penalty stroke — rethrow from your last lie.\nSpace to continue.")
+		_advance_at = t + 2.0
+		_set_message("Splash! Penalty stroke — rethrow from your last lie.")
 	elif p.x < -50.0 or p.x > course.length + 150.0 \
 			or course.lateral_off_fairway(p) > 300.0:
 		stroke += 1
 		lie = prev_lie
 		state = State.SETTLED
-		_set_message("Out of bounds! Penalty stroke — rethrow from your last lie.\nSpace to continue.")
+		_advance_at = t + 2.0
+		_set_message("Out of bounds! Penalty stroke — rethrow from your last lie.")
 	elif p.distance_to(course.basket) < 18.0:
 		_holed()
 	else:
 		lie = p
 		state = State.SETTLED
-		_set_message("%d m to the basket. Space for the next throw." % _dist_m(p, course.basket))
+		_advance_at = t + 1.3
+		_set_message("%d m to the basket." % _dist_m(p, course.basket))
 
 
 func _holed() -> void:
@@ -309,15 +321,18 @@ func _holed() -> void:
 	var label: String = names.get(diff, "%+d." % diff)
 	if stroke == 1:
 		label = "ACE!!"
-	_set_message("Chains! %s (%d/%d)\nSpace for hole %d." % [
-			label, stroke, course.par, hole + 1])
+	_advance_at = t + 3.0
+	_set_message("Chains! %s (%d/%d)" % [label, stroke, course.par])
 
 
-## Frame the whole hole in screen space: with the diagonal layout this puts
-## the tee at the lower-left and the basket at the upper-right of the view.
+## Frame the REMAINING shot in screen space: from just behind the current
+## lie to the basket. On the tee that's the whole hole (lie lower-left,
+## basket upper-right); later shots tighten as the hole shrinks.
 func _compute_hole_framing() -> void:
-	var rect := Rect2(_ground_pt(0.0, course.centerline_at(0.0)), Vector2.ZERO)
-	var x := 0.0
+	var rect := Rect2(_ground_pt(lie.x, lie.y), Vector2.ZERO)
+	rect = rect.expand(_ground_pt(lie.x, lie.y - 140.0))
+	rect = rect.expand(_ground_pt(lie.x, lie.y + 140.0))
+	var x := clampf(lie.x - 160.0, 0.0, course.length)
 	while x <= course.length:
 		var cl := course.centerline_at(x)
 		rect = rect.expand(_ground_pt(x, cl - course.half_width - 130.0))
