@@ -53,6 +53,8 @@ var t := 0.0
 var _cy := cos(VIEW_YAW)
 var _sy := sin(VIEW_YAW)
 var _roll := 0.0             # visual spin angle for the disc spokes
+var _fit_center := Vector2.ZERO
+var _fit_zoom := 1.0
 
 var camera: Camera2D
 var _trail: Array[Vector3] = []
@@ -104,7 +106,9 @@ func _start_hole() -> void:
 	_trail.clear()
 	_hit_trees.clear()
 	_make_streaks()
-	camera.position = _project(_lie_pos3())
+	_compute_hole_framing()
+	camera.position = _fit_center
+	camera.zoom = Vector2(_fit_zoom, _fit_zoom)
 	camera.reset_smoothing()
 	_set_message("Hole %d — par %d, %d m. Space to throw." % [
 			hole, course.par, _dist_m(lie, course.basket)])
@@ -309,16 +313,41 @@ func _holed() -> void:
 			label, stroke, course.par, hole + 1])
 
 
+## Frame the whole hole in screen space: with the diagonal layout this puts
+## the tee at the lower-left and the basket at the upper-right of the view.
+func _compute_hole_framing() -> void:
+	var rect := Rect2(_ground_pt(0.0, course.centerline_at(0.0)), Vector2.ZERO)
+	var x := 0.0
+	while x <= course.length:
+		var cl := course.centerline_at(x)
+		rect = rect.expand(_ground_pt(x, cl - course.half_width - 130.0))
+		rect = rect.expand(_ground_pt(x, cl + course.half_width + 130.0))
+		x += 160.0
+	rect = rect.grow(70.0)
+	_fit_center = rect.get_center()
+	var vp := get_viewport_rect().size
+	_fit_zoom = clampf(minf(vp.x / rect.size.x, vp.y / rect.size.y), 0.34, 1.0)
+
+
 func _update_camera() -> void:
-	var focus: Vector2
+	# Aiming shows the whole hole; flight tightens onto the disc.
+	var target_pos := _fit_center
+	var target_zoom := _fit_zoom
 	if state == State.FLYING:
-		focus = _project(disc.pos)
+		target_pos = _project(disc.pos)
+		target_zoom = maxf(_fit_zoom, 0.75)
 	elif Input.is_key_pressed(KEY_TAB):
-		var b := course.basket
-		focus = _ground_pt(b.x, b.y)
-	else:
-		focus = _project(disc.pos if state != State.AIMING else _lie_pos3())
-	camera.position = focus
+		target_pos = _ground_pt(course.basket.x, course.basket.y)
+		target_zoom = 1.0
+	camera.position = target_pos
+	var z: float = lerpf(camera.zoom.x, target_zoom,
+			1.0 - exp(-4.0 * get_process_delta_time()))
+	camera.zoom = Vector2(z, z)
+
+
+## Inflate small markers when the camera is zoomed out so they stay legible.
+func _vis_scale() -> float:
+	return clampf(1.0 / camera.zoom.x, 1.0, 1.9)
 
 
 # ---------- projection & drawing ----------
@@ -452,9 +481,10 @@ func _draw_disc() -> void:
 	draw_circle(Vector2.ZERO, srad, Color(0, 0, 0, 0.22))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	var sp := _project(disc.pos)
+	var vs := _vis_scale()
 	# The ellipse leans with the disc's bank (tilt) so hyzer/anhyzer reads.
 	var lean := (disc.tilt if state == State.FLYING else deg_to_rad(tilt_deg)) * 0.6
-	draw_set_transform(sp, lean, Vector2(1.0, 0.55))
+	draw_set_transform(sp, lean, Vector2(vs, 0.55 * vs))
 	draw_circle(Vector2.ZERO, 10.0, DISC_COL)
 	draw_arc(Vector2.ZERO, 9.0, 0.0, TAU, 24, DISC_COL.darkened(0.35), 2.0, true)
 	# Spokes rotating with the actual spin: direction and rate are visible.
@@ -488,15 +518,16 @@ func _draw_aim_guide() -> void:
 		pts.append(probe.pos)
 		if probe.pos.z <= course.elevation(probe.pos.x):
 			break
+	var vs := _vis_scale()
 	for i in pts.size():
 		var fade := 1.0 - i / float(pts.size() + 2)
 		var wp := pts[i]
 		var arc_pt := _project(wp)
 		var ground := _ground_pt(wp.x, wp.y)
-		draw_circle(ground, 2.4, Color(0.05, 0.08, 0.05, 0.45 * fade))
+		draw_circle(ground, 2.4 * vs, Color(0.05, 0.08, 0.05, 0.45 * fade))
 		if i % 3 == 1:
 			draw_line(ground, arc_pt, Color(0.08, 0.10, 0.13, 0.18 * fade), 1.0, true)
-		draw_circle(arc_pt, 3.2, Color(0.08, 0.10, 0.13, 0.6 * fade))
+		draw_circle(arc_pt, 3.2 * vs, Color(0.08, 0.10, 0.13, 0.6 * fade))
 
 
 func _make_streaks() -> void:
