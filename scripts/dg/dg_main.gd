@@ -27,8 +27,14 @@ const DISC_COL := Color(0.95, 0.55, 0.35)
 
 const HEADING_RATE := 1.1     # rad/s
 const LOFT_RATE := 22.0       # deg/s
-const POWER_RATE := 320.0
 const SPIN_RATE := 1.1
+const POWER_MIN := 300.0
+const POWER_MAX := 950.0
+const CHARGE_RATE := 430.0    # power gained per second while charging
+
+# Touch layout (viewport coords): the throw circle and the tap buttons.
+const THROW_BTN := Vector2(1165, 560)
+const THROW_BTN_R := 56.0
 const ROLL_DECEL := 260.0
 const ROUGH_DECEL := 620.0
 
@@ -56,6 +62,14 @@ var _roll := 0.0             # visual spin angle for the disc spokes
 var _fit_center := Vector2.ZERO
 var _fit_zoom := 1.0
 var _advance_at := -1.0      # auto-continue time after a shot settles
+
+# Hold-to-charge throw state. _charge_touch is the finger on the throw
+# button (-1 while charging via spacebar); _swipe_touch aims by dragging.
+var _charging := false
+var _charge_touch := -2
+var _swipe_touch := -2
+var _throw_btn_node: Node2D
+var _fhbh_btn: Button
 
 var camera: Camera2D
 var _trail: Array[Vector3] = []
@@ -161,10 +175,6 @@ func _handle_aiming(delta: float) -> void:
 		loft = clampf(loft + LOFT_RATE * delta, 4.0, 42.0)
 	if Input.is_key_pressed(KEY_DOWN):
 		loft = clampf(loft - LOFT_RATE * delta, 4.0, 42.0)
-	if Input.is_key_pressed(KEY_W):
-		power = clampf(power + POWER_RATE * delta, 300.0, 950.0)
-	if Input.is_key_pressed(KEY_S):
-		power = clampf(power - POWER_RATE * delta, 300.0, 950.0)
 	if Input.is_key_pressed(KEY_A):
 		spin_strength = clampf(spin_strength - SPIN_RATE * delta, 0.2, 1.0)
 	if Input.is_key_pressed(KEY_D):
@@ -176,11 +186,47 @@ func _handle_aiming(delta: float) -> void:
 	if Input.is_key_pressed(KEY_F) and not _f_held:
 		forehand = not forehand
 	_f_held = Input.is_key_pressed(KEY_F)
-	if Input.is_action_just_pressed("ui_accept"):
-		_throw()
+
+	# Hold-to-charge, release-to-throw (spacebar mirrors the touch button).
+	if Input.is_action_just_pressed("ui_accept") and not _charging:
+		_charging = true
+		_charge_touch = -1
+		power = POWER_MIN
+	if _charging:
+		power = clampf(power + CHARGE_RATE * delta, POWER_MIN, POWER_MAX)
+		if _charge_touch == -1 and Input.is_action_just_released("ui_accept"):
+			_charging = false
+			_throw()
 
 
 var _f_held := false
+
+
+## Touch controls: hold the throw circle to charge (release = throw), swipe
+## anywhere else to aim (horizontal = direction, vertical = loft). A second
+## finger can aim while the first charges. Mouse emulates touch.
+func _unhandled_input(event: InputEvent) -> void:
+	if state != State.AIMING:
+		return
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			if event.position.distance_to(THROW_BTN) <= THROW_BTN_R + 12.0:
+				if not _charging:
+					_charging = true
+					_charge_touch = event.index
+					power = POWER_MIN
+			elif _swipe_touch == -2:
+				_swipe_touch = event.index
+		else:
+			if _charging and event.index == _charge_touch:
+				_charging = false
+				_charge_touch = -2
+				_throw()
+			elif event.index == _swipe_touch:
+				_swipe_touch = -2
+	elif event is InputEventScreenDrag and event.index == _swipe_touch:
+		heading += event.relative.x * 0.0022
+		loft = clampf(loft - event.relative.y * 0.14, 4.0, 42.0)
 
 
 func _next_shot() -> void:
@@ -195,6 +241,8 @@ func _next_shot() -> void:
 
 
 func _throw() -> void:
+	_charging = false
+	_charge_touch = -2
 	stroke += 1
 	prev_lie = lie
 	disc.launch(_lie_pos3(), heading, loft, power, _spin_signed(),
@@ -625,13 +673,58 @@ func _build_hud() -> void:
 	_message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_message_label.add_theme_font_size_override("font_size", 24)
 	var help := _make_label(hud, Vector2(16, 668))
-	help.text = "LEFT/RIGHT aim    UP/DOWN loft    W/S power    A/D spin strength\nQ/E disc tilt (hyzer/anhyzer)    F forehand-backhand    SPACE throw    hold TAB view basket"
+	help.text = "swipe or LEFT/RIGHT + UP/DOWN: aim & loft    hold THROW / SPACE: charge power, release to throw\nA/D spin strength    Q/E or buttons: tilt    F: forehand-backhand    hold TAB: view basket"
 	help.add_theme_font_size_override("font_size", 13)
 	help.modulate = Color(1, 1, 1, 0.85)
+
 	_wind_arrow = Node2D.new()
 	_wind_arrow.position = Vector2(540, 22)
 	_wind_arrow.draw.connect(_draw_wind_arrow)
 	hud.add_child(_wind_arrow)
+
+	# Throw circle with a charging power ring.
+	_throw_btn_node = Node2D.new()
+	_throw_btn_node.position = THROW_BTN
+	_throw_btn_node.draw.connect(_draw_throw_btn)
+	hud.add_child(_throw_btn_node)
+
+	# Tap buttons: tilt left / tilt right / forehand-backhand.
+	var tilt_l := _make_tap_button(hud, "tilt L", Vector2(1000, 460))
+	tilt_l.pressed.connect(func() -> void:
+		tilt_deg = clampf(tilt_deg - 5.0, -35.0, 35.0))
+	var tilt_r := _make_tap_button(hud, "tilt R", Vector2(1000, 512))
+	tilt_r.pressed.connect(func() -> void:
+		tilt_deg = clampf(tilt_deg + 5.0, -35.0, 35.0))
+	_fhbh_btn = _make_tap_button(hud, "backhand", Vector2(1000, 564))
+	_fhbh_btn.pressed.connect(func() -> void:
+		forehand = not forehand)
+
+
+func _make_tap_button(parent: Node, text: String, pos: Vector2) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.position = pos
+	b.size = Vector2(100, 44)
+	b.focus_mode = Control.FOCUS_NONE
+	b.add_theme_font_size_override("font_size", 15)
+	b.modulate = Color(1, 1, 1, 0.85)
+	parent.add_child(b)
+	return b
+
+
+func _draw_throw_btn() -> void:
+	var n := _throw_btn_node
+	n.draw_circle(Vector2.ZERO, THROW_BTN_R, Color(0.16, 0.26, 0.20, 0.80))
+	n.draw_arc(Vector2.ZERO, THROW_BTN_R - 4.0, 0.0, TAU, 40,
+			Color(1, 1, 1, 0.25), 3.0, true)
+	if _charging:
+		var frac := (power - POWER_MIN) / (POWER_MAX - POWER_MIN)
+		n.draw_arc(Vector2.ZERO, THROW_BTN_R - 4.0, -PI / 2.0,
+				-PI / 2.0 + frac * TAU, 40, Color(0.98, 0.80, 0.35), 6.0, true)
+	var f := ThemeDB.fallback_font
+	n.draw_string(f, Vector2(-THROW_BTN_R, 6), "THROW",
+			HORIZONTAL_ALIGNMENT_CENTER, THROW_BTN_R * 2.0, 17,
+			Color(1, 1, 1, 0.9))
 
 
 func _draw_wind_arrow() -> void:
@@ -673,6 +766,9 @@ func _update_hud() -> void:
 			Vector2(disc.pos.x, disc.pos.y) if state != State.AIMING else lie,
 			course.basket)]
 	_wind_arrow.queue_redraw()
+	_throw_btn_node.visible = state == State.AIMING
+	_throw_btn_node.queue_redraw()
+	_fhbh_btn.text = "forehand" if forehand else "backhand"
 
 
 func _set_message(text: String) -> void:
